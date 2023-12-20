@@ -20,6 +20,10 @@ from pytorch_lightning.utilities import rank_zero_info
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
 
+from datasets import load_dataset
+from PIL import Image
+import io
+from torchvision import transforms
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -182,14 +186,73 @@ class DataModuleFromConfig(pl.LightningDataModule):
             self.predict_dataloader = self._predict_dataloader
         self.wrap = wrap
 
-    def prepare_data(self):
-        for data_cfg in self.dataset_configs.values():
-            instantiate_from_config(data_cfg)
+
 
     def setup(self, stage=None):
-        self.datasets = dict(
-            (k, instantiate_from_config(self.dataset_configs[k]))
-            for k in self.dataset_configs)
+
+
+        preprocess = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ])
+
+        class PickapicDataset(Dataset):
+            def __init__(self, data, transform=None):
+                self.data = data
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                sample = self.data[idx]
+
+                # Extract required fields from the dictionary
+                caption = sample['caption']
+                jpg_0 = preprocess(Image.open(io.BytesIO(sample['jpg_0'])))
+                jpg_1 = preprocess(Image.open(io.BytesIO(sample['jpg_1'])))
+                label_0 = torch.tensor(sample['label_0'], dtype=torch.float32)
+                label_1 = torch.tensor(sample['label_1'], dtype=torch.float32)
+
+                if int(label_0) == 1:
+                    jpg_better = jpg_0
+                    jpg_worse = jpg_1
+                    label_better = label_0
+                    label_worse = label_1
+                else:
+                    jpg_better = jpg_1
+                    jpg_worse = jpg_0
+                    label_better = label_1
+                    label_worse = label_0
+                # Perform any additional processing if needed, e.g., loading images from URLs
+
+                # Return a dictionary of tensors or required data
+                return {
+                    'caption': caption,
+                    'jpg_win': jpg_better,
+                    'jpg_lose': jpg_worse,
+                    'label_win': label_better,
+                    'label_lose': label_worse,
+                }
+
+        train_data = load_dataset("yuvalkirstain/pickapic_v1", split="train[:50%]")
+        # remove ties
+        train_data = [data for data in train_data if data['label_0'] != data['label_1']]
+        train_dataset = PickapicDataset(data=train_data, transform=preprocess)
+
+        val_data = load_dataset("yuvalkirstain/pickapic_v1", split="validation")
+        # remove ties
+        val_data = [data for data in val_data if data['label_0'] != data['label_1']]
+        val_dataset = PickapicDataset(data=val_data, transform=preprocess)
+
+
+        test_data = load_dataset("yuvalkirstain/pickapic_v1", split="test")
+        # remove ties
+        test_data = [data for data in test_data if data['label_0'] != data['label_1']]
+        test_dataset = PickapicDataset(data=test_data, transform=preprocess)
+
+
+        self.datasets = {"train": train_dataset, "val": val_dataset, "test": test_dataset}
         if self.wrap:
             for k in self.datasets:
                 self.datasets[k] = WrappedDataset(self.datasets[k])
@@ -660,11 +723,15 @@ if __name__ == "__main__":
         trainer.logdir = logdir  ###
 
         # data
-        data = instantiate_from_config(config.data)
+
+        ## todo: change this line for loading data
+        #data = instantiate_from_config(config.data)
+        data = DataModuleFromConfig(64):
+
         # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
         # calling these ourselves should not be necessary but it is.
         # lightning still takes care of proper multiprocessing though
-        data.prepare_data()
+        #data.prepare_data()
         data.setup()
         print("#### Data #####")
         for k in data.datasets:
