@@ -134,6 +134,46 @@ def nondefault_trainer_args(opt):
     return sorted(k for k in vars(args) if getattr(opt, k) != getattr(args, k))
 
 
+class PickapicDataset(Dataset):
+            def __init__(self, data, transform=None):
+                self.data = data
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                sample = self.data[idx]
+
+                # Extract required fields from the dictionary
+                caption = sample['caption']
+                jpg_0 = preprocess(Image.open(io.BytesIO(sample['jpg_0'])))
+                jpg_1 = preprocess(Image.open(io.BytesIO(sample['jpg_1'])))
+                label_0 = torch.tensor(sample['label_0'], dtype=torch.float32)
+                label_1 = torch.tensor(sample['label_1'], dtype=torch.float32)
+
+                if int(label_0) == 1:
+                    jpg_better = jpg_0
+                    jpg_worse = jpg_1
+                    label_better = label_0
+                    label_worse = label_1
+                else:
+                    jpg_better = jpg_1
+                    jpg_worse = jpg_0
+                    label_better = label_1
+                    label_worse = label_0
+                # Perform any additional processing if needed, e.g., loading images from URLs
+
+                # Return a dictionary of tensors or required data
+                return {
+                    'caption': caption,
+                    'jpg_win': jpg_better,
+                    'jpg_lose': jpg_worse,
+                    'label_win': label_better,
+                    'label_lose': label_worse,
+                }
+
+
 class WrappedDataset(Dataset):
     """Wraps an arbitrary object with __len__ and __getitem__ into a pytorch dataset"""
 
@@ -196,44 +236,6 @@ class DataModuleFromConfig(pl.LightningDataModule):
             transforms.ToTensor(),
         ])
 
-        class PickapicDataset(Dataset):
-            def __init__(self, data, transform=None):
-                self.data = data
-                self.transform = transform
-
-            def __len__(self):
-                return len(self.data)
-
-            def __getitem__(self, idx):
-                sample = self.data[idx]
-
-                # Extract required fields from the dictionary
-                caption = sample['caption']
-                jpg_0 = preprocess(Image.open(io.BytesIO(sample['jpg_0'])))
-                jpg_1 = preprocess(Image.open(io.BytesIO(sample['jpg_1'])))
-                label_0 = torch.tensor(sample['label_0'], dtype=torch.float32)
-                label_1 = torch.tensor(sample['label_1'], dtype=torch.float32)
-
-                if int(label_0) == 1:
-                    jpg_better = jpg_0
-                    jpg_worse = jpg_1
-                    label_better = label_0
-                    label_worse = label_1
-                else:
-                    jpg_better = jpg_1
-                    jpg_worse = jpg_0
-                    label_better = label_1
-                    label_worse = label_0
-                # Perform any additional processing if needed, e.g., loading images from URLs
-
-                # Return a dictionary of tensors or required data
-                return {
-                    'caption': caption,
-                    'jpg_win': jpg_better,
-                    'jpg_lose': jpg_worse,
-                    'label_win': label_better,
-                    'label_lose': label_worse,
-                }
 
         train_data = load_dataset("yuvalkirstain/pickapic_v1", split="train[:50%]")
         # remove ties
@@ -258,12 +260,23 @@ class DataModuleFromConfig(pl.LightningDataModule):
                 self.datasets[k] = WrappedDataset(self.datasets[k])
 
     def _train_dataloader(self):
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
+        
+        preprocess = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ])
+
+        train_data = load_dataset("yuvalkirstain/pickapic_v1", split="train[:50%]")
+        # remove ties
+        train_data = [data for data in train_data if data['label_0'] != data['label_1']]
+        train_dataset = PickapicDataset(data=train_data, transform=preprocess)
+        
+        is_iterable_dataset = isinstance(train_data, Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
-        return DataLoader(self.datasets["train"], batch_size=self.batch_size,
+        return DataLoader(train_data, batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
                           worker_init_fn=init_fn)
 
@@ -726,8 +739,7 @@ if __name__ == "__main__":
 
         ## todo: change this line for loading data
         #data = instantiate_from_config(config.data)
-        data = DataModuleFromConfig(64):
-
+        data = DataModuleFromConfig(64,"Train")
         # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
         # calling these ourselves should not be necessary but it is.
         # lightning still takes care of proper multiprocessing though
@@ -738,7 +750,7 @@ if __name__ == "__main__":
             print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
 
         # configure learning rate
-        bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
+        bs, base_lr = 64, config.model.base_learning_rate
         if not cpu:
             ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
         else:
