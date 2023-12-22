@@ -153,24 +153,24 @@ class PickapicDataset(Dataset):
                 label_1 = torch.tensor(sample['label_1'], dtype=torch.float32)
 
                 if int(label_0) == 1:
-                    jpg_better = jpg_0
-                    jpg_worse = jpg_1
-                    label_better = label_0
-                    label_worse = label_1
+                    jpg_win = jpg_0
+                    jpg_lose = jpg_1
+                    label_win = label_0
+                    label_lose = label_1
                 else:
-                    jpg_better = jpg_1
-                    jpg_worse = jpg_0
-                    label_better = label_1
-                    label_worse = label_0
+                    jpg_win = jpg_1
+                    jpg_lose = jpg_0
+                    label_win = label_1
+                    label_lose = label_0
                 # Perform any additional processing if needed, e.g., loading images from URLs
 
                 # Return a dictionary of tensors or required data
                 return {
                     'caption': caption,
-                    'jpg_win': jpg_better,
-                    'jpg_lose': jpg_worse,
-                    'label_win': label_better,
-                    'label_lose': label_worse,
+                    'jpg_win': jpg_win,
+                    'jpg_lose': jpg_lose,
+                    'label_win': label_win,
+                    'label_lose': label_lose,
                 }
 
 
@@ -262,7 +262,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
     def _train_dataloader(self):
         
         preprocess = transforms.Compose([
-            transforms.Resize((256, 256)),
+            transforms.Resize((32, 32)),
             transforms.ToTensor(),
         ])
 

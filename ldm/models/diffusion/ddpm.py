@@ -306,10 +306,13 @@ class DDPM(pl.LightningModule):
 
         loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
 
+
         log_prefix = 'train' if self.training else 'val'
 
         loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
         loss_simple = loss.mean() * self.l_simple_weight
+
+        ## todo: to recover the original RPO formula, we can consider using loss_simple in the end
 
         loss_vlb = (self.lvlb_weights[t] * loss).mean()
         loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
@@ -320,30 +323,68 @@ class DDPM(pl.LightningModule):
 
         return loss, loss_dict
 
-    def forward(self, x, *args, **kwargs):
+    # def forward(self, x, *args, **kwargs):
+    #     # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
+    #     # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
+    #     t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+    #     return self.p_losses(x, t, *args, **kwargs)
+
+    # todo: potential debugging keys: what's the device of x? where to we set is?
+    def forward(self, x_win, x_lose,*args, **kwargs):
         # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        return self.p_losses(x, t, *args, **kwargs)
+        t = torch.randint(0, self.num_timesteps, (x_win.shape[0],), device=self.device).long()
+        loss_win, loss_dict_win = self.p_losses(x_win, t, *args, **kwargs)
+        loss_lose, loss_dict_lose = self.p_losses(x_win, t, *args, **kwargs)
+        return (loss_win, loss_lose, loss_dict_win, loss_dict_lose)
 
-    def get_input(self, batch, k):
-        x = batch[k]
-        if len(x.shape) == 3:
-            x = x[..., None]
-        x = rearrange(x, 'b h w c -> b c h w')
-        x = x.to(memory_format=torch.contiguous_format).float()
-        return x
+    # def get_input(self, batch, k):
+    #     x = batch[k]
+    #     if len(x.shape) == 3:
+    #         x = x[..., None]
+    #     x = rearrange(x, 'b h w c -> b c h w')
+    #     x = x.to(memory_format=torch.contiguous_format).float()
+    #     return x
+    def get_input(self, batch):
+        #todo: verify if the input images are alredy of "b c h w"
+        # input image from data loader are of type b c h w
+        jpg_win = batch['jpg_win']
+        jpg_lose = batch['jpg_lose']
+
+        return jpg_win, jpg_lose
+
+    # def shared_step(self, batch):
+    #
+    #     x = self.get_input(batch, self.first_stage_key)
+    #     loss, loss_dict = self(x)
+    #     return loss, loss_dict
 
     def shared_step(self, batch):
-        x = self.get_input(batch, self.first_stage_key)
-        loss, loss_dict = self(x)
-        return loss, loss_dict
+        jpg_win, jpg_lose = self.get_input(batch)
+        loss_win, loss_lose, loss_dict_win, loss_dict_lose = self(jpg_win, jpg_lose)
+        return loss_win, loss_lose, loss_dict_win, loss_dict_lose
+    # def training_step(self, batch, batch_idx):
+    #
+    #     loss, loss_dict = self.shared_step(batch)
+    #
+    #     self.log_dict(loss_dict, prog_bar=True,
+    #                   logger=True, on_step=True, on_epoch=True)
+    #
+    #     self.log("global_step", self.global_step,
+    #              prog_bar=True, logger=True, on_step=True, on_epoch=False)
+    #
+    #     if self.use_scheduler:
+    #         lr = self.optimizers().param_groups[0]['lr']
+    #         self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+    #
+    #     return loss
 
     def training_step(self, batch, batch_idx):
-        loss, loss_dict = self.shared_step(batch)
+        loss_win, loss_lose, loss_dict_win, loss_dict_lose = self.shared_step(batch)
+        loss = loss_win /(loss_win + loss_lose)
 
-        self.log_dict(loss_dict, prog_bar=True,
-                      logger=True, on_step=True, on_epoch=True)
+        # self.log_dict(loss_dict, prog_bar=True,
+        #               logger=True, on_step=True, on_epoch=True)
 
         self.log("global_step", self.global_step,
                  prog_bar=True, logger=True, on_step=True, on_epoch=False)
@@ -354,6 +395,8 @@ class DDPM(pl.LightningModule):
 
         return loss
 
+
+    #todo: update this after the first round of debugging
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         _, loss_dict_no_ema = self.shared_step(batch)
@@ -650,34 +693,95 @@ class LatentDiffusion(DDPM):
 
         return fold, unfold, normalization, weighting
 
+    # @torch.no_grad()
+    # def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
+    #               cond_key=None, return_original_cond=False, bs=None):
+    #     x = super().get_input(batch, k)
+    #     if bs is not None:
+    #         x = x[:bs]
+    #     x = x.to(self.device)
+    #     encoder_posterior = self.encode_first_stage(x)
+    #     z = self.get_first_stage_encoding(encoder_posterior).detach()
+    #
+    #     if self.model.conditioning_key is not None:
+    #         if cond_key is None:
+    #             cond_key = self.cond_stage_key
+    #         if cond_key != self.first_stage_key:
+    #             if cond_key in ['caption', 'coordinates_bbox']:
+    #                 xc = batch[cond_key]
+    #             elif cond_key == 'class_label':
+    #                 xc = batch
+    #             else:
+    #                 xc = super().get_input(batch, cond_key).to(self.device)
+    #         else:
+    #             xc = x
+    #         if not self.cond_stage_trainable or force_c_encode:
+    #             if isinstance(xc, dict) or isinstance(xc, list):
+    #                 # import pudb; pudb.set_trace()
+    #                 c = self.get_learned_conditioning(xc)
+    #             else:
+    #                 c = self.get_learned_conditioning(xc.to(self.device))
+    #         else:
+    #             c = xc
+    #         if bs is not None:
+    #             c = c[:bs]
+    #
+    #         if self.use_positional_encodings:
+    #             pos_x, pos_y = self.compute_latent_shifts(batch)
+    #             ckey = __conditioning_keys__[self.model.conditioning_key]
+    #             c = {ckey: c, 'pos_x': pos_x, 'pos_y': pos_y}
+    #
+    #     else:
+    #         c = None
+    #         xc = None
+    #         if self.use_positional_encodings:
+    #             pos_x, pos_y = self.compute_latent_shifts(batch)
+    #             c = {'pos_x': pos_x, 'pos_y': pos_y}
+    #     out = [z, c]
+    #     if return_first_stage_outputs:
+    #         xrec = self.decode_first_stage(z)
+    #         out.extend([x, xrec])
+    #     if return_original_cond:
+    #         out.append(xc)
+    #     return out
+
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None):
-        x = super().get_input(batch, k)
+        jpg_win, jpg_lose = super().get_input(batch, k)
         if bs is not None:
-            x = x[:bs]
-        x = x.to(self.device)
-        encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
+            jpg_win = jpg_win[:bs]
+            jpg_lose = jpg_lose[:bs]
+        jpg_win = jpg_win.to(self.device)
+        jpg_lose = jpg_lose.to(self.device)
+        encoder_posterior_win = self.encode_first_stage(jpg_win)
+        encoder_posterior_lose = self.encode_first_stage(jpg_lose)
+        z_win = self.get_first_stage_encoding(encoder_posterior_win).detach()
+        z_lose = self.get_first_stage_encoding(encoder_posterior_lose).detach()
+
+
 
         if self.model.conditioning_key is not None:
             if cond_key is None:
                 cond_key = self.cond_stage_key
             if cond_key != self.first_stage_key:
+                ## RPO will go to here
                 if cond_key in ['caption', 'coordinates_bbox']:
                     xc = batch[cond_key]
                 elif cond_key == 'class_label':
                     xc = batch
                 else:
                     xc = super().get_input(batch, cond_key).to(self.device)
-            else:
-                xc = x
+            # else:
+            #     xc = x
+
             if not self.cond_stage_trainable or force_c_encode:
                 if isinstance(xc, dict) or isinstance(xc, list):
                     # import pudb; pudb.set_trace()
                     c = self.get_learned_conditioning(xc)
                 else:
                     c = self.get_learned_conditioning(xc.to(self.device))
+            ### RPO will go here
             else:
                 c = xc
             if bs is not None:
@@ -694,13 +798,17 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
-        out = [z, c]
+        out_win = [z_win, c]
+        out_lose = [z_lose, c]
         if return_first_stage_outputs:
-            xrec = self.decode_first_stage(z)
-            out.extend([x, xrec])
+            xrec_win = self.decode_first_stage(z_win)
+            xrec_lose = self.decode_first_stage(z_lose)
+            out_win.extend([jpg_win, xrec_win])
+            out_lose.extend([jpg_lose, xrec_lose])
         if return_original_cond:
-            out.append(xc)
-        return out
+            out_win.append(xc)
+            out_lose.append(xc)
+        return out_win, out_lose
 
     @torch.no_grad()
     def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
@@ -863,20 +971,39 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
-        return loss
+        out_win, out_lose = self.get_input(batch, self.first_stage_key)
+        x_win, c = out_win
+        x_lose, c = out_lose
+        loss_win, loss_lose, loss_dict_win, loss_dict_lose = self(x_win, x_lose,c)
+        return loss_win, loss_lose, loss_dict_win, loss_dict_lose
 
-    def forward(self, x, c, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+
+    # def forward(self, x_win, x_lose ,c, *args, **kwargs):
+    #     t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+    #     if self.model.conditioning_key is not None:
+    #         assert c is not None
+    #         if self.cond_stage_trainable:
+    #             c = self.get_learned_conditioning(c)
+    #         if self.shorten_cond_schedule:  # TODO: drop this option
+    #             tc = self.cond_ids[t].to(self.device)
+    #             c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+    #     return self.p_losses(x, c, t, *args, **kwargs)
+
+    def forward(self, x_win, x_lose ,c, *args, **kwargs):
+        t = torch.randint(0, self.num_timesteps, (x_win.shape[0],), device=self.device).long()
+
         if self.model.conditioning_key is not None:
-            assert c is not None
-            if self.cond_stage_trainable:
-                c = self.get_learned_conditioning(c)
-            if self.shorten_cond_schedule:  # TODO: drop this option
-                tc = self.cond_ids[t].to(self.device)
-                c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, t, *args, **kwargs)
+                assert c is not None
+                if self.cond_stage_trainable:
+                    c = self.get_learned_conditioning(c)
+                if self.shorten_cond_schedule:  # TODO: drop this option
+                    tc = self.cond_ids[t].to(self.device)
+                    c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+
+        loss_win, loss_dict_win = self.p_losses(x_win, c ,t, *args, **kwargs)
+        loss_lose, loss_dict_lose = self.p_losses(x_win, c ,t, *args, **kwargs)
+        return (loss_win, loss_lose, loss_dict_win, loss_dict_lose)
+
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
