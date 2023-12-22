@@ -137,8 +137,10 @@ def nondefault_trainer_args(opt):
 class PickapicDataset(Dataset):
             def __init__(self, data, transform=None):
                 self.data = data
-                self.transform = transform
-
+                self.transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ])
             def __len__(self):
                 return len(self.data)
 
@@ -147,8 +149,8 @@ class PickapicDataset(Dataset):
 
                 # Extract required fields from the dictionary
                 caption = sample['caption']
-                jpg_0 = preprocess(Image.open(io.BytesIO(sample['jpg_0'])))
-                jpg_1 = preprocess(Image.open(io.BytesIO(sample['jpg_1'])))
+                jpg_0 = self.transform(Image.open(io.BytesIO(sample['jpg_0'])))
+                jpg_1 = self.transform(Image.open(io.BytesIO(sample['jpg_1'])))
                 label_0 = torch.tensor(sample['label_0'], dtype=torch.float32)
                 label_1 = torch.tensor(sample['label_1'], dtype=torch.float32)
 
@@ -231,27 +233,21 @@ class DataModuleFromConfig(pl.LightningDataModule):
     def setup(self, stage=None):
 
 
-        preprocess = transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-        ])
-
-
         train_data = load_dataset("yuvalkirstain/pickapic_v1", split="train[:50%]")
         # remove ties
         train_data = [data for data in train_data if data['label_0'] != data['label_1']]
-        train_dataset = PickapicDataset(data=train_data, transform=preprocess)
+        train_dataset = PickapicDataset(data=train_data)
 
         val_data = load_dataset("yuvalkirstain/pickapic_v1", split="validation")
         # remove ties
         val_data = [data for data in val_data if data['label_0'] != data['label_1']]
-        val_dataset = PickapicDataset(data=val_data, transform=preprocess)
+        val_dataset = PickapicDataset(data=val_data)
 
 
         test_data = load_dataset("yuvalkirstain/pickapic_v1", split="test")
         # remove ties
         test_data = [data for data in test_data if data['label_0'] != data['label_1']]
-        test_dataset = PickapicDataset(data=test_data, transform=preprocess)
+        test_dataset = PickapicDataset(data=test_data)
 
 
         self.datasets = {"train": train_dataset, "val": val_dataset, "test": test_dataset}
@@ -261,22 +257,17 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
     def _train_dataloader(self):
         
-        preprocess = transforms.Compose([
-            transforms.Resize((32, 32)),
-            transforms.ToTensor(),
-        ])
-
         train_data = load_dataset("yuvalkirstain/pickapic_v1", split="train[:50%]")
         # remove ties
         train_data = [data for data in train_data if data['label_0'] != data['label_1']]
-        train_dataset = PickapicDataset(data=train_data, transform=preprocess)
+        train_dataset = PickapicDataset(data=train_data)
         
-        is_iterable_dataset = isinstance(train_data, Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(train_dataset, Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
-        return DataLoader(train_data, batch_size=self.batch_size,
+        return DataLoader(train_dataset, batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
                           worker_init_fn=init_fn)
 
@@ -745,6 +736,9 @@ if __name__ == "__main__":
         # lightning still takes care of proper multiprocessing though
         #data.prepare_data()
         data.setup()
+
+
+
         print("#### Data #####")
         for k in data.datasets:
             print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")

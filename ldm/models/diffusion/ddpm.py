@@ -748,7 +748,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None):
-        jpg_win, jpg_lose = super().get_input(batch, k)
+        jpg_win, jpg_lose = super().get_input(batch)
         if bs is not None:
             jpg_win = jpg_win[:bs]
             jpg_lose = jpg_lose[:bs]
