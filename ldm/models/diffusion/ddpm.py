@@ -334,8 +334,10 @@ class DDPM(pl.LightningModule):
         # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (x_win.shape[0],), device=self.device).long()
+        print(t.device)
+        print(x_win.device)
         loss_win, loss_dict_win = self.p_losses(x_win, t, *args, **kwargs)
-        loss_lose, loss_dict_lose = self.p_losses(x_win, t, *args, **kwargs)
+        loss_lose, loss_dict_lose = self.p_losses(x_lose, t, *args, **kwargs)
         return (loss_win, loss_lose, loss_dict_win, loss_dict_lose)
 
     # def get_input(self, batch, k):
@@ -350,6 +352,11 @@ class DDPM(pl.LightningModule):
         # input image from data loader are of type b c h w
         jpg_win = batch['jpg_win']
         jpg_lose = batch['jpg_lose']
+        jpg_win = jpg_win.to(self.device)
+        jpg_lose = jpg_lose.to(self.device)
+        print("Getting images")
+        print(jpg_win.shape)
+        print(jpg_win.device)
 
         return jpg_win, jpg_lose
 

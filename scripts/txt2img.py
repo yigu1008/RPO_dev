@@ -33,7 +33,7 @@ def from_file(path, low=None, high=None):
     prompts = _load_lines(path)[low:high]
     return random.choice(prompts), {}
 
-def calc_probs(prompt, images):
+def calc_probs(prompt, images, model):
 
         # preprocess
         image_inputs = processor(
@@ -170,8 +170,15 @@ if __name__ == "__main__":
     config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
 
+    ## todo: fill in the trained ckpt path
+    model_trained = load_model_from_config(config, "models/ldm")
+
+
+
+
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
+    model_trained = model_trained.to(device)
 
     if opt.plms:
         sampler = PLMSSampler(model)
@@ -200,7 +207,7 @@ if __name__ == "__main__":
     model_pretrained_name_or_path = "yuvalkirstain/PickScore_v1"
 
     processor = AutoProcessor.from_pretrained(processor_name_or_path)
-    model = AutoModel.from_pretrained(model_pretrained_name_or_path).eval().to(device)
+    pick_score = AutoModel.from_pretrained(model_pretrained_name_or_path).eval().to(device)
 
     # batch contains batched prompts loaded from the file
     with torch.no_grad():
@@ -230,7 +237,7 @@ if __name__ == "__main__":
                     for i, x_sample in enumerate(x_samples_ddim):
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                         pil_image = Image.fromarray(x_sample.astype(np.uint8))
-                        probs = calc_probs(batch[i], pil_image)
+                        probs = calc_probs(batch[i], pil_image, pick_score)
                         base_count += 1
                     all_samples.append(x_samples_ddim)
 
