@@ -11,6 +11,65 @@ from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 
+import os
+import functools
+import random
+
+from transformers import AutoProcessor, AutoModel
+
+from pathlib import Path
+
+
+@functools.cache
+def _load_lines(path):
+    """
+    Load lines from a file. First tries to load from `path` directly, and if that doesn't exist, searches the
+    `ddpo_pytorch/assets` directory for a file named `path`.
+    """
+
+    with open(path, "r") as f:
+        return [line.strip() for line in f.readlines()]
+def from_file(path, low=None, high=None):
+    prompts = _load_lines(path)[low:high]
+    return random.choice(prompts), {}
+
+def calc_probs(prompt, images):
+
+        # preprocess
+        image_inputs = processor(
+            images=images,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        ).to(device)
+
+        text_inputs = processor(
+            text=prompt,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            # embed
+            image_embs = model.get_image_features(**image_inputs)
+            image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
+
+            text_embs = model.get_text_features(**text_inputs)
+            text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
+
+            # score
+            scores = model.logit_scale.exp() * (text_embs @ image_embs.T)[0]
+
+            # get probabilities if you have multiple images to choose from
+            probs = torch.softmax(scores, dim=-1)
+
+        return probs.cpu().tolist()
+
+
+
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -33,12 +92,17 @@ def load_model_from_config(config, ckpt, verbose=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    # parser.add_argument(
+    #     "--prompt",
+    #     type=str,
+    #     nargs="?",
+    #     default="a painting of a virus monster playing guitar",
+    #     help="the prompt to render"
+    # )
     parser.add_argument(
-        "--prompt",
-        type=str,
-        nargs="?",
-        default="a painting of a virus monster playing guitar",
-        help="the prompt to render"
+                    "--sample-batch-size",
+        type=int,
+        default=64,
     )
 
     parser.add_argument(
@@ -103,7 +167,6 @@ if __name__ == "__main__":
     )
     opt = parser.parse_args()
 
-
     config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
 
@@ -118,48 +181,61 @@ if __name__ == "__main__":
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
 
-    prompt = opt.prompt
 
+    ## todo: may be add extra for loop here
+    sample_batch_size = opt.sample_batch_size
+    prompts = []
+    prompts =[from_file("sampled_captions.txt") for _ in range(opt.n_samples)]
+    batches = np.array_split(prompts, len(prompts) // sample_batch_size + 1)
 
     sample_path = os.path.join(outpath, "samples")
     os.makedirs(sample_path, exist_ok=True)
     base_count = len(os.listdir(sample_path))
 
-    all_samples=list()
+
+
+    ### Load Pick Score model
+
+    processor_name_or_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    model_pretrained_name_or_path = "yuvalkirstain/PickScore_v1"
+
+    processor = AutoProcessor.from_pretrained(processor_name_or_path)
+    model = AutoModel.from_pretrained(model_pretrained_name_or_path).eval().to(device)
+
+    # batch contains batched prompts loaded from the file
     with torch.no_grad():
         with model.ema_scope():
-            uc = None
-            if opt.scale != 1.0:
-                uc = model.get_learned_conditioning(opt.n_samples * [""])
-            for n in trange(opt.n_iter, desc="Sampling"):
-                c = model.get_learned_conditioning(opt.n_samples * [prompt])
-                shape = [4, opt.H//8, opt.W//8]
-                samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                 conditioning=c,
-                                                 batch_size=opt.n_samples,
-                                                 shape=shape,
-                                                 verbose=False,
-                                                 unconditional_guidance_scale=opt.scale,
-                                                 unconditional_conditioning=uc,
-                                                 eta=opt.ddim_eta)
+            for batch in trange(sample_batch_size):
+                all_samples = list()
+                probs = list()
+                uc = None
+                if opt.scale != 1.0:
+                    uc = model.get_learned_conditioning(opt.n_samples * [""])
+                for n in trange(opt.n_iter, desc="Sampling"):
+                    # todo: change this line for multiple prompts
+                    c = model.get_learned_conditioning(batch)
+                    shape = [4, opt.H//8, opt.W//8]
+                    samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                                                    conditioning=c,
+                                                    batch_size=opt.n_samples,
+                                                    shape=shape,
+                                                    verbose=False,
+                                                    unconditional_guidance_scale=opt.scale,
+                                                    unconditional_conditioning=uc,
+                                                    eta=opt.ddim_eta)
 
-                x_samples_ddim = model.decode_first_stage(samples_ddim)
-                x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
+                    x_samples_ddim = model.decode_first_stage(samples_ddim)
+                    x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
 
-                for x_sample in x_samples_ddim:
-                    x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                    Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"{base_count:04}.png"))
-                    base_count += 1
-                all_samples.append(x_samples_ddim)
+                    for i, x_sample in enumerate(x_samples_ddim):
+                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        pil_image = Image.fromarray(x_sample.astype(np.uint8))
+                        probs = calc_probs(batch[i], pil_image)
+                        base_count += 1
+                    all_samples.append(x_samples_ddim)
+
+                ### Evaluating Pick Score of Sampled images
 
 
-    # additionally, save as grid
-    grid = torch.stack(all_samples, 0)
-    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-    grid = make_grid(grid, nrow=opt.n_samples)
+                ## todo: plug everything into the model
 
-    # to image
-    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'{prompt.replace(" ", "-")}.png'))
-
-    print(f"Your samples are ready and waiting four you here: \n{outpath} \nEnjoy.")
